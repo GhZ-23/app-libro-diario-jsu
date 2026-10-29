@@ -23,10 +23,10 @@ from groq import Groq
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "clave-super-secreta-liceo-2024")
 
-# 🔥 SOLUCIÓN PARA PY DROID
+# 🔥 SOLUCIÓN PARA PY DROID Y RENDER
 DB = os.path.join(os.path.expanduser("~"), "libro.db")
 
-# SEGURIDAD DE LA API KEY
+# SEGURIDAD DE LA API KEY (La clave real va en Render -> Environment)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # ==========================================
@@ -456,7 +456,6 @@ def home():
         con.close()
         return render_template_string(HTML_APP, vista=vista, hoy="")
 
-    # 🔥 AQUÍ ESTÁ LA CORRECCIÓN: Traemos exactamente las columnas en el orden correcto
     if vista == "todos":
         cur.execute("SELECT id, tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE user_id=? ORDER BY fecha DESC", (uid,))
         docs = cur.fetchall(); con.close()
