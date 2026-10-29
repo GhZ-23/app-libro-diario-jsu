@@ -1,0 +1,6 @@
+Flask
+groq
+openpyxl
+reportlab
+gunicorn
+werkzeug
