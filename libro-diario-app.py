@@ -673,7 +673,7 @@ def procesar_foto():
         client = Groq(api_key=GROQ_API_KEY)
         prompt = "Eres un asistente contable. Devuelve ESTRICTAMENTE una lista JSON: [{'rut':'...', 'folio':'...', 'nombre':'...', 'neto':0, 'iva':0, 'total':0, 'fecha':'...'}]"
         
-        completion = client.chat.completions.create(model="llama-3.2-11b-vision-preview", messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}], temperature=0.1)
+        completion = client.chat.completions.create(model="openai/gpt-oss-20b", messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}], temperature=0.1)
         datos_lista = json.loads(completion.choices[0].message.content.replace('```json', '').replace('```', '').strip())
         if isinstance(datos_lista, dict): datos_lista = [datos_lista]
             
@@ -699,7 +699,7 @@ def api_ia():
     try:
         client = Groq(api_key=GROQ_API_KEY)
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant", 
+            model="openai/gpt-oss-20b", 
             messages=[{"role": "system", "content": "Eres un contador chileno. Responde corto."}, {"role": "user", "content": pregunta}],
             temperature=0.5, max_tokens=500
         )
