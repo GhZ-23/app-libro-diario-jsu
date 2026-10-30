@@ -1,11 +1,12 @@
-import sqlite3
-from datetime import datetime
-import io
 import os
-import shutil
+import io
 import base64
 import json
+from datetime import datetime
 from functools import wraps
+
+import psycopg2
+from psycopg2.extras import DictCursor
 from flask import Flask, request, redirect, render_template_string, send_file, jsonify, session
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -23,27 +24,33 @@ from groq import Groq
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "clave-super-secreta-liceo-2024")
 
-# 🔥 SOLUCIÓN PARA PY DROID Y RENDER
-DB = os.path.join(os.path.expanduser("~"), "libro.db")
+# 🔥 CONEXIÓN A SUPABASE (POSTGRESQL)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise Exception("Falta la variable DATABASE_URL en Render")
 
-# SEGURIDAD DE LA API KEY (La clave real va en Render -> Environment)
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
+# SEGURIDAD DE LA API KEY
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 # ==========================================
 # FUNCIONES DE BASE DE DATOS Y SEGURIDAD
 # ==========================================
 def init_db():
-    con = sqlite3.connect(DB)
-    con.execute("""CREATE TABLE IF NOT EXISTS usuarios(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    con = get_db()
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS usuarios(
+        id SERIAL PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS docs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cur.execute("""CREATE TABLE IF NOT EXISTS docs(
+        id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
         tipo TEXT, tipo_doc TEXT, fecha TEXT, folio TEXT, rut TEXT, nombre TEXT,
         neto REAL, exento REAL, iva REAL, total REAL, pago TEXT, nota TEXT)""")
-    con.commit(); con.close()
+    con.commit(); cur.close(); con.close()
 
 init_db()
 
@@ -397,9 +404,9 @@ async function buscarRut() {
 def login():
     if request.method == 'POST':
         user = request.form['username']; pw = request.form['password']
-        con = sqlite3.connect(DB); cur = con.cursor()
-        cur.execute("SELECT id, password FROM usuarios WHERE username=?", (user,))
-        row = cur.fetchone(); con.close()
+        con = get_db(); cur = con.cursor()
+        cur.execute("SELECT id, password FROM usuarios WHERE username=%s", (user,))
+        row = cur.fetchone(); cur.close(); con.close()
         if row and check_password_hash(row[1], pw):
             session['user_id'] = row[0]; session['username'] = user
             return redirect('/')
@@ -412,11 +419,11 @@ def register():
         user = request.form['username']; pw = request.form['password']
         hashed_pw = generate_password_hash(pw)
         try:
-            con = sqlite3.connect(DB)
-            con.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", (user, hashed_pw))
-            con.commit(); con.close()
+            con = get_db(); cur = con.cursor()
+            cur.execute("INSERT INTO usuarios (username, password) VALUES (%s, %s)", (user, hashed_pw))
+            con.commit(); cur.close(); con.close()
             return redirect('/login')
-        except sqlite3.IntegrityError:
+        except psycopg2.IntegrityError:
             return render_template_string(HTML_REGISTER, error="Ese usuario ya existe")
     return render_template_string(HTML_REGISTER)
 
@@ -440,30 +447,30 @@ def home():
     tipo_resumen = request.args.get("tipo", "general") 
     uid = session['user_id']
     
-    con = sqlite3.connect(DB); cur = con.cursor()
+    con = get_db(); cur = con.cursor()
     
     if vista == "resumen":
-        cur.execute("SELECT count(*), sum(cast(neto as real)) FROM docs WHERE user_id=?", (uid,))
+        cur.execute("SELECT count(*), sum(cast(neto as real)) FROM docs WHERE user_id=%s", (uid,))
         row = cur.fetchone(); global_docs = row[0] or 0; global_neto = row[1] or 0.0
-        cur.execute("SELECT sum(cast(neto as real)), sum(cast(exento as real)), sum(cast(iva as real)), sum(cast(total as real)) FROM docs WHERE tipo='Compra' AND user_id=?", (uid,))
+        cur.execute("SELECT sum(cast(neto as real)), sum(cast(exento as real)), sum(cast(iva as real)), sum(cast(total as real)) FROM docs WHERE tipo='Compra' AND user_id=%s", (uid,))
         rc = cur.fetchone(); tot_c = {"neto": rc[0] or 0, "exento": rc[1] or 0, "iva": rc[2] or 0, "total": rc[3] or 0}
-        cur.execute("SELECT sum(cast(neto as real)), sum(cast(exento as real)), sum(cast(iva as real)), sum(cast(total as real)) FROM docs WHERE tipo='Venta' AND user_id=?", (uid,))
+        cur.execute("SELECT sum(cast(neto as real)), sum(cast(exento as real)), sum(cast(iva as real)), sum(cast(total as real)) FROM docs WHERE tipo='Venta' AND user_id=%s", (uid,))
         rv = cur.fetchone(); tot_v = {"neto": rv[0] or 0, "exento": rv[1] or 0, "iva": rv[2] or 0, "total": rv[3] or 0}
-        con.close()
+        cur.close(); con.close()
         return render_template_string(HTML_APP, vista=vista, tipo_resumen=tipo_resumen, global_docs=global_docs, global_neto=global_neto, tot_c=tot_c, tot_v=tot_v)
 
     if vista == "ia" or vista == "orden":
-        con.close()
+        cur.close(); con.close()
         return render_template_string(HTML_APP, vista=vista, hoy="")
 
     if vista == "todos":
-        cur.execute("SELECT id, tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE user_id=? ORDER BY fecha DESC", (uid,))
-        docs = cur.fetchall(); con.close()
+        cur.execute("SELECT id, tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE user_id=%s ORDER BY fecha DESC", (uid,))
+        docs = cur.fetchall(); cur.close(); con.close()
         return render_template_string(HTML_APP, docs=docs, vista=vista, hoy=datetime.now().strftime("%Y-%m-%d"))
 
     tipo = "Compra" if vista == "compras" else "Venta"
-    cur.execute("SELECT id, tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE tipo=? AND user_id=? ORDER BY fecha DESC", (tipo, uid))
-    docs = cur.fetchall(); con.close()
+    cur.execute("SELECT id, tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE tipo=%s AND user_id=%s ORDER BY fecha DESC", (tipo, uid))
+    docs = cur.fetchall(); cur.close(); con.close()
     return render_template_string(HTML_APP, docs=docs, vista=vista, hoy=datetime.now().strftime("%Y-%m-%d"))
 
 @app.route("/add", methods=["POST"])
@@ -485,26 +492,28 @@ def add():
     total = neto + exento + iva
     if tipo_doc == "Nota de Crédito": neto, exento, iva, total = -abs(neto), -abs(exento), -abs(iva), -abs(total)
     
-    con = sqlite3.connect(DB)
-    con.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) 
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (uid, f["tipo"], tipo_doc, f["fecha"], f["folio"], f["rut"], f["nombre"], neto, exento, iva, total, f["pago"], nota))
-    con.commit(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) 
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (uid, f["tipo"], tipo_doc, f["fecha"], f["folio"], f["rut"], f["nombre"], neto, exento, iva, total, f["pago"], nota))
+    con.commit(); cur.close(); con.close()
     return redirect(f"/?vista={'compras' if f['tipo'] == 'Compra' else 'ventas'}")
 
 @app.route("/del/<int:id>")
 @login_required
 def delete(id):
     uid = session['user_id']
-    con = sqlite3.connect(DB); con.execute("DELETE FROM docs WHERE id=? AND user_id=?", (id, uid)); con.commit(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("DELETE FROM docs WHERE id=%s AND user_id=%s", (id, uid))
+    con.commit(); cur.close(); con.close()
     return redirect(f"/?vista={request.args.get('vista', 'compras')}")
 
 @app.route("/nuevo_libro", methods=["POST"])
 @login_required
 def nuevo_libro():
     uid = session['user_id']
-    con = sqlite3.connect(DB)
-    con.execute("DELETE FROM docs WHERE user_id=?", (uid,))
-    con.commit(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("DELETE FROM docs WHERE user_id=%s", (uid,))
+    con.commit(); cur.close(); con.close()
     return redirect("/?vista=compras")
 
 # ==========================================
@@ -522,14 +531,14 @@ def importar_excel():
     try:
         wb = load_workbook(file)
         ws = wb.active
-        con = sqlite3.connect(DB)
+        con = get_db(); cur = con.cursor()
         for row in ws.iter_rows(min_row=2, values_only=True):
             if not row[0]: continue
             tipo = "Compra" if vista_actual == "compras" else "Venta"
-            con.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) 
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", 
+            cur.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) 
+                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", 
                         (uid, tipo, row[1], row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10]))
-        con.commit(); con.close()
+        con.commit(); cur.close(); con.close()
     except Exception as e:
         print("Error importando:", e)
 
@@ -541,9 +550,9 @@ def exportar_excel():
     uid = session['user_id']
     vista = request.args.get("vista", "compras")
     tipo = "Compra" if vista == "compras" else "Venta"
-    con = sqlite3.connect(DB); cur = con.cursor()
-    cur.execute("SELECT fecha, tipo_doc, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE tipo=? AND user_id=? ORDER BY fecha", (tipo, uid))
-    docs = cur.fetchall(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("SELECT fecha, tipo_doc, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE tipo=%s AND user_id=%s ORDER BY fecha", (tipo, uid))
+    docs = cur.fetchall(); cur.close(); con.close()
 
     wb = Workbook(); ws = wb.active; ws.title = f"Libro {vista.capitalize()}"
     headers = ["Fecha", "TipoDoc", "Folio", "RUT", "Nombre", "Neto", "Exento", "IVA", "Total", "Pago/Cobro", "Nota"]
@@ -576,9 +585,9 @@ def exportar_excel():
 @login_required
 def exportar_ordenado_excel():
     uid = session['user_id']
-    con = sqlite3.connect(DB); cur = con.cursor()
-    cur.execute("SELECT tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE user_id=?", (uid,))
-    all_docs = cur.fetchall(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("SELECT tipo, tipo_doc, fecha, folio, rut, nombre, neto, exento, iva, total, pago, nota FROM docs WHERE user_id=%s", (uid,))
+    all_docs = cur.fetchall(); cur.close(); con.close()
     
     def sort_func(d): return (str(d[5]).lower(), str(d[2]), str(d[3]))
     compras = [d for d in all_docs if d[0] == 'Compra']
@@ -635,25 +644,25 @@ def exportar_ordenado_excel():
 def exportar_pdf():
     uid = session['user_id']
     vista = request.args.get("vista", "resumen")
-    con = sqlite3.connect(DB); cur = con.cursor()
+    con = get_db(); cur = con.cursor()
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     elementos = [Paragraph(f"<b>Reporte Contable - {vista.capitalize()}</b>", getSampleStyleSheet()['Title']), Spacer(1, 12)]
     
     if vista == "resumen":
-        cur.execute("SELECT sum(cast(iva as real)) FROM docs WHERE tipo='Compra' AND user_id=?", (uid,)); iva_c = cur.fetchone()[0] or 0
-        cur.execute("SELECT sum(cast(iva as real)) FROM docs WHERE tipo='Venta' AND user_id=?", (uid,)); iva_v = cur.fetchone()[0] or 0
+        cur.execute("SELECT sum(cast(iva as real)) FROM docs WHERE tipo='Compra' AND user_id=%s", (uid,)); iva_c = cur.fetchone()[0] or 0
+        cur.execute("SELECT sum(cast(iva as real)) FROM docs WHERE tipo='Venta' AND user_id=%s", (uid,)); iva_v = cur.fetchone()[0] or 0
         dif = iva_v - iva_c
         data = [["Concepto", "Monto"], ["IVA Crédito", f"${iva_c:,.0f}"], ["IVA Débito", f"${iva_v:,.0f}"], ["Resultado IVA", f"${dif:,.0f}"]]
         t = Table(data, colWidths=[300, 150])
     else:
         tipo = "Compra" if vista == "compras" else "Venta"
-        cur.execute("SELECT fecha, tipo_doc, nombre, total FROM docs WHERE tipo=? AND user_id=? ORDER BY fecha", (tipo, uid))
+        cur.execute("SELECT fecha, tipo_doc, nombre, total FROM docs WHERE tipo=%s AND user_id=%s ORDER BY fecha", (tipo, uid))
         data = [["Fecha", "Documento", "Nombre", "Total"]] + [[r[0], r[1], r[2], f"${float(r[3] or 0):,.0f}"] for r in cur.fetchall()]
         t = Table(data, colWidths=[80, 120, 200, 80])
         
     t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2E7D32")), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke), ('GRID', (0, 0), (-1, -1), 1, colors.HexColor("#c8e6c9"))]))
-    elementos.append(t); con.close(); doc.build(elementos); buffer.seek(0)
+    elementos.append(t); cur.close(); con.close(); doc.build(elementos); buffer.seek(0)
     return send_file(buffer, mimetype='application/pdf', as_attachment=True, download_name=f"Reporte_{vista}.pdf")
 
 # ==========================================
@@ -679,14 +688,14 @@ def procesar_foto():
             
         tipo = "Compra" if vista_actual == "compras" else "Venta"
         uid = session['user_id']
-        con = sqlite3.connect(DB); guardados = 0
+        con = get_db(); cur = con.cursor(); guardados = 0
         for datos in datos_lista:
             if not datos.get("total"): continue 
             neto = float(datos.get("neto") or 0); iva = float(datos.get("iva") or (neto * 0.19)); total = float(datos.get("total") or (neto + iva))
-            con.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", 
+            cur.execute("""INSERT INTO docs(user_id,tipo,tipo_doc,fecha,folio,rut,nombre,neto,exento,iva,total,pago,nota) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", 
                         (uid, tipo, "Factura Electrónica", datos.get("fecha") or datetime.now().strftime("%Y-%m-%d"), datos.get("folio") or "S/N", datos.get("rut") or "S/R", datos.get("nombre") or "Desc", neto, 0, iva, total, "Contado", ""))
             guardados += 1
-        con.commit(); con.close()
+        con.commit(); cur.close(); con.close()
         return redirect(f"/?vista={vista_actual}")
     except Exception as e:
         return f"Error IA: {str(e)}"
@@ -712,9 +721,9 @@ def api_ia():
 def get_rut():
     uid = session['user_id']
     nombre = request.args.get("nombre", "").strip()
-    con = sqlite3.connect(DB); cur = con.cursor()
-    cur.execute("SELECT rut FROM docs WHERE nombre LIKE ? AND user_id=? ORDER BY id DESC LIMIT 1", (f"%{nombre}%", uid))
-    row = cur.fetchone(); con.close()
+    con = get_db(); cur = con.cursor()
+    cur.execute("SELECT rut FROM docs WHERE nombre LIKE %s AND user_id=%s ORDER BY id DESC LIMIT 1", (f"%{nombre}%", uid))
+    row = cur.fetchone(); cur.close(); con.close()
     return jsonify({"rut": row[0] if row and row[0] else ""})
 
 if __name__ == "__main__":
